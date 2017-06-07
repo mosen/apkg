@@ -1,0 +1,1 @@
+git+https://github.com/mosen/bixar.git#egg=bixar
