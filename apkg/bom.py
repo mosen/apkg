@@ -4,13 +4,11 @@
 from struct import *
 from collections import namedtuple
 
-import io
-from ctypes import Structure, BigEndianStructure, POINTER, c_char, c_uint32, c_uint8, c_uint16, c_char_p, sizeof
 from enum import IntEnum
-import zlib
 
+import io
 
-BOM_HEADER_FORMAT = '>8sIIIIII'
+BOM_HEADER_FORMAT = '>8sLLLLLL'
 BOMHeader = namedtuple('BOMHeader', 'magic version numberOfBlocks indexOffset indexLength varsOffset varsLength')
 
 BOM_POINTER_FORMAT = '>II'
@@ -22,67 +20,29 @@ BOMBlockTable = namedtuple('BOMBlockTable', 'numberOfBlockTablePointers blockPoi
 BOM_FREE_LIST_FORMAT = '>II'
 BOMFreeList = namedtuple('BOMFreeList', 'numberOfFreeListPointers freelistPointers')
 
+BOM_INFO_ENTRY_FORMAT = '>IIII'
+BOMInfoEntry = namedtuple('BOMInfoEntry', 'unknown0 unknown1 unknown2 unknown3')
 
-class BOMInfoEntry(Structure):
-    _fields_ = [
-        ("unknown0", c_uint32),
-        ("unknown1", c_uint32),
-        ("unknown2", c_uint32),
-        ("unknown3", c_uint32),
-    ]
+BOM_INFO_FORMAT = '>IIII'
+BOMInfo = namedtuple('BOMInfo', 'version numberOfPaths numberOfInfoEntries entries')
 
+BOM_TREE_FORMAT = '>4cIIIIB'
+BOMTree = namedtuple('BOMTree', 'tree version child blockSize pathCount unknown3')
 
-class BOMInfo(Structure):
-    _fields_ = [
-        ("version", c_uint32),
-        ("numberOfPaths", c_uint32),
-        ("numberOfInfoEntries", c_uint32),
-        ("entries", POINTER(BOMInfoEntry)),
-    ]
+BOM_VINDEX_FORMAT = '>IIIB'
+BOMVindex = namedtuple('BOMVIndex', 'unknown0 indexToVTree unknown2 unknown3')
 
+BOM_VAR_FORMAT = '>IB'
+BOMVar = namedtuple('BOMVar', 'index length')  # name member starts at end of BOMVar, goes for 'length'
 
-class BOMTree(Structure):
-    _fields_ = [
-        ("tree", c_char * 4),
-        ("version", c_uint32),
-        ("child", c_uint32),
-        ("blockSize", c_uint32),
-        ("pathCount", c_uint32),
-        ("unknown3", c_uint8),
-    ]
-
-
-class BOMVIndex(Structure):
-    _fields_ = [
-        ("unknown0", c_uint32),
-        ("indexToVTree", c_uint32),
-        ("unknown2", c_uint32),
-        ("unknown3", c_uint8),
-    ]
-
-
-BOM_VAR_FORMAT = '>IB10s'
-BOMVar = namedtuple('BOMVar', 'index length name')
-
-BOM_VARS_FORMAT = '>II'
+BOM_VARS_FORMAT = '>LI'
 BOMVars = namedtuple('BOMVars', 'count first')
 
+BOM_PATH_INDICES_FORMAT = '>II'
+BOMPathIndices = namedtuple('BOMPathIndices', 'index0 index1')
 
-class BOMPathIndices(Structure):
-    _fields_ = [
-        ("index0", c_uint32),
-        ("index1", c_uint32),
-    ]
-
-
-class BOMPaths(Structure):
-    _fields_ = [
-        ("isLeaf", c_uint16),
-        ("count", c_uint16),
-        ("forward", c_uint32),
-        ("backward", c_uint32),
-        ("indices", POINTER(BOMPathIndices)),
-    ]
+BOM_PATHS_FORMAT = '>HHIII'
+BOMPaths = namedtuple('BOMPaths', 'isLeaf count forward backward indices')
 
 
 class BOMItemType(IntEnum):
@@ -91,36 +51,20 @@ class BOMItemType(IntEnum):
     Link = 3
     Device = 4
 
+BOM_PATH_INFO2_FORMAT = '>BBHHIIIIBIII'
+BOMPathInfo2 = namedtuple('BOMPathInfo2',
+                'type unknown0 architecture mode user group modtime size unknown1 checksum linkNameLength linkName')
 
-class BOMPathInfo2(Structure):
-    _fields_ = [
-        ("type", c_uint8),  # BOMItemType
-        ("unknown0", c_uint8),
-        ("architecture", c_uint16),
-        ("mode", c_uint16),
-        ("user", c_uint32),
-        ("group", c_uint32),
-        ("modtime", c_uint32),
-        ("size", c_uint32),
-        ("unknown1", c_uint8),
-        ("checksum", c_uint32),  # union with device type
-        ("linkNameLength", c_uint32),
-        ("linkName", POINTER(c_char)),
-    ]
+BOM_PATH_INFO1_FORMAT = '>II'
+BOMPathInfo1 = namedtuple('BOMPathInfo1', 'id index')
+
+BOM_FILE_FORMAT = '>II'
+BOMFile = namedtuple('BOMFile', 'parent name')
 
 
-class BOMPathInfo1(Structure):
-    _fields_ = [
-        ("id", c_uint32),
-        ("index", POINTER(BOMPathInfo2)),
-    ]
-
-
-class BOMFile(Structure):
-    _fields_ = [
-        ("parent", c_uint32),
-        ("name", c_char_p),
-    ]
+def read_namedtuple_struct(fileobj, format_string, nt):
+    raw_bytes = fileobj.read(calcsize(format_string))
+    return nt._make(unpack(format_string, raw_bytes))
 
 
 class BillOfMaterials(object):
@@ -138,26 +82,47 @@ class BillOfMaterials(object):
 
     def parse(self):
         self._fileobj.seek(0)
-        raw_header = self._fileobj.read(calcsize(BOM_HEADER_FORMAT))
-        header = BOMHeader._make(unpack(BOM_HEADER_FORMAT, raw_header))
+
+        header = read_namedtuple_struct(self._fileobj, BOM_HEADER_FORMAT, BOMHeader)
         print(header)
+
+        self._fileobj.seek(header.indexOffset, io.SEEK_SET)
+        block_table = read_namedtuple_struct(self._fileobj, BOM_BLOCK_TABLE_FORMAT, BOMBlockTable)
+        print(block_table)
+
+        # Read all the pointers in (number * pointer size)
+        block_table_pointers = self._fileobj.read(calcsize(BOM_POINTER_FORMAT) * block_table.numberOfBlockTablePointers)
+
+        numberOfNonNullEntries = 0
+        for i in range(0, block_table.numberOfBlockTablePointers):
+            ptr_offset, = unpack('>I', block_table_pointers[i*4:i*4+4])
+            self._fileobj.seek(header.indexOffset + ptr_offset)
+            ptr = read_namedtuple_struct(self._fileobj, BOM_POINTER_FORMAT, BOMPointer)
+            if ptr.address != 0:
+                numberOfNonNullEntries = numberOfNonNullEntries + 1
+            
+        print('non null entries', numberOfNonNullEntries)
+
+
+        # print('seek to varsOffset {}'.format(header.varsOffset))
+        # self._fileobj.seek(header.varsOffset, 0)
         #
-        print(header.magic)
-
-        print('seek to {}'.format(header.varsOffset))
-        self._fileobj.seek(header.varsOffset, 0)
-
-        raw_vars = self._fileobj.read(calcsize(BOM_VARS_FORMAT))
-        bvars = BOMVars._make(unpack(BOM_VARS_FORMAT, raw_vars))
-        bvars_offset = header.varsOffset + bvars.first
-        print(bvars_offset)
-
-        for v in range(0, bvars.count):
-            self._fileobj.seek(bvars_offset, 0)
-            bvar_raw = self._fileobj.read(calcsize(BOM_VAR_FORMAT))
-            bvar = BOMVar._make(unpack(BOM_VAR_FORMAT, bvar_raw))
-            print(bvar.name)
-
-            bvars_offset = bvars_offset + calcsize(BOM_VAR_FORMAT) + bvar.length
-            # ptr += sizeof(BOMVar) + var->length;
-            print(bvars_offset)
+        # raw_vars = self._fileobj.read(calcsize(BOM_VARS_FORMAT))
+        # bvars = BOMVars._make(unpack(BOM_VARS_FORMAT, raw_vars))
+        # print(bvars)
+        # print('BOMVars first at ', bvars.first)
+        # bvars_offset = header.varsOffset + bvars.first
+        # print('BOMVars vars offset', bvars_offset)
+        #
+        # for v in range(0, bvars.count):
+        #     self._fileobj.seek(bvars_offset, 0)
+        #     print(bvars_offset)
+        #     bvar_raw = self._fileobj.read(calcsize(BOM_VAR_FORMAT))
+        #     bvar = BOMVar._make(unpack(BOM_VAR_FORMAT, bvar_raw))
+        #     print(bvar)
+        #     print('bvar length: ', bvar.length)
+        #     bvar_name = self._fileobj.read(bvar.length)
+        #     print(bvar_name)
+        #
+        #     bvars_offset = bvars_offset + calcsize(BOM_VAR_FORMAT) + (bvar.length-1)
+        #     # ptr += sizeof(BOMVar) + var->length;
