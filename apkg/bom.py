@@ -1,42 +1,26 @@
 # Converted from bomutils
 # Copyright (C) 2013 Fabian Renn - fabian.renn (at) gmail.com
 
-from ctypes import Structure, POINTER, c_char, c_uint32, c_uint8, c_uint16, c_char_p
+from struct import *
+from collections import namedtuple
+
+import io
+from ctypes import Structure, BigEndianStructure, POINTER, c_char, c_uint32, c_uint8, c_uint16, c_char_p, sizeof
 from enum import IntEnum
 import zlib
 
 
-class BOMHeader(Structure):
-    _fields_ = [
-        ("magic", c_char * 8),
-        ("version", c_uint32),
-        ("numberOfBlocks", c_uint32),
-        ("indexOffset", c_uint32),
-        ("indexLength", c_uint32),
-        ("varsOffset", c_uint32),
-        ("varsLength", c_uint32),
-    ]
+BOM_HEADER_FORMAT = '>8sIIIIII'
+BOMHeader = namedtuple('BOMHeader', 'magic version numberOfBlocks indexOffset indexLength varsOffset varsLength')
 
+BOM_POINTER_FORMAT = '>II'
+BOMPointer = namedtuple('BOMPointer', 'address length')
 
-class BOMPointer(Structure):
-    _fields_ = [
-        ("address", c_uint32),
-        ("length", c_uint32),
-    ]
+BOM_BLOCK_TABLE_FORMAT = '>II'  # second member is pointer to start of BOMPointer[]
+BOMBlockTable = namedtuple('BOMBlockTable', 'numberOfBlockTablePointers blockPointers')
 
-
-class BOMBlockTable(Structure):
-    _fields_ = [
-        ("numberOfBlockTablePointers", c_uint32),
-        ("blockPointers", POINTER(BOMPointer)),
-    ]
-
-
-class BOMFreeList(Structure):
-    _fields_ = [
-        ("numberOfFreeListPointers", c_uint32),
-        ("freelistPointers", POINTER(BOMPointer)),
-    ]
+BOM_FREE_LIST_FORMAT = '>II'
+BOMFreeList = namedtuple('BOMFreeList', 'numberOfFreeListPointers freelistPointers')
 
 
 class BOMInfoEntry(Structure):
@@ -77,19 +61,11 @@ class BOMVIndex(Structure):
     ]
 
 
-class BOMVar(Structure):
-    _fields_ = [
-        ("index", c_uint32),
-        ("length", c_uint8),
-        ("name", c_char_p),
-    ]
+BOM_VAR_FORMAT = '>IB10s'
+BOMVar = namedtuple('BOMVar', 'index length name')
 
-
-class BOMVars(Structure):
-    _fields_ = [
-        ("count", c_uint32),
-        ("first", POINTER(BOMVar)),
-    ]
+BOM_VARS_FORMAT = '>II'
+BOMVars = namedtuple('BOMVars', 'count first')
 
 
 class BOMPathIndices(Structure):
@@ -145,3 +121,43 @@ class BOMFile(Structure):
         ("parent", c_uint32),
         ("name", c_char_p),
     ]
+
+
+class BillOfMaterials(object):
+
+    def __init__(self, path: str=None, fileobj=None):
+        if fileobj is None:
+            fileobj = open(path, 'rb')
+
+        self._fileobj = fileobj
+        # assert BillOfMaterials.is_bom(self._fileobj)
+
+    @classmethod
+    def is_bom(cls, fileobj):
+        return fileobj.read(8) == b'BOMStore'
+
+    def parse(self):
+        self._fileobj.seek(0)
+        raw_header = self._fileobj.read(calcsize(BOM_HEADER_FORMAT))
+        header = BOMHeader._make(unpack(BOM_HEADER_FORMAT, raw_header))
+        print(header)
+        #
+        print(header.magic)
+
+        print('seek to {}'.format(header.varsOffset))
+        self._fileobj.seek(header.varsOffset, 0)
+
+        raw_vars = self._fileobj.read(calcsize(BOM_VARS_FORMAT))
+        bvars = BOMVars._make(unpack(BOM_VARS_FORMAT, raw_vars))
+        bvars_offset = header.varsOffset + bvars.first
+        print(bvars_offset)
+
+        for v in range(0, bvars.count):
+            self._fileobj.seek(bvars_offset, 0)
+            bvar_raw = self._fileobj.read(calcsize(BOM_VAR_FORMAT))
+            bvar = BOMVar._make(unpack(BOM_VAR_FORMAT, bvar_raw))
+            print(bvar.name)
+
+            bvars_offset = bvars_offset + calcsize(BOM_VAR_FORMAT) + bvar.length
+            # ptr += sizeof(BOMVar) + var->length;
+            print(bvars_offset)

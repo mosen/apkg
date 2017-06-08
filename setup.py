@@ -24,6 +24,7 @@ setup(
     setup_requires=['pytest-runner'],
     entry_points={
         'console_scripts': [
+            'lsbom=apkg.lsbom:main'
         ]
     },
     zip_safe=False
